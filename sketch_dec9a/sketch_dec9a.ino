@@ -1,126 +1,116 @@
 #include <Wire.h>
-#include <GY521.h>  // Correct library to interact with MPU6050
+#include <WiFi.h>
+#include <WebServer.h>
+#include <DHT.h>    // Include the DHT library
+#include "BMP180_ESP32.h"
+#include "index.h" // Our HTML webpage contents with javascripts
 
-MPU6050 mpu;
+// Define sensor pins
+DHT dht(37, DHT11);   // Define DHT sensor
+SFE_BMP180 bmp180;    // Create an instance of the BMP180 class
 
-unsigned long previousTime = 0;
-float timeStep = 0.01;  // This will be updated based on actual elapsed time
+// Define custom pins for I2C
+#define SDA_PIN 36  // Change this to your desired SDA pin
+#define SCL_PIN 35  // Change this to your desired SCL pin
+#define P0 1013.25  // Standard atmospheric pressure at sea level (in hPa)
 
-// Pitch, Roll and Yaw values
-float pitch = 0;
-float roll = 0;
-float yaw = 0;
+// Wi-Fi credentials
+const char* ssid = "Slippers2sat";
+const char* password = "S2S#2024";
 
-// Rotation counters
-int pitchRounds = 0;
-int rollRounds = 0;
-int yawRounds = 0;
+// Create a web server on port 80
+WebServer server(80);
 
-void setup() 
-{
-  Serial.begin(115200);
-
-  Serial.println("Initialize MPU6050");
-
-  // Initialize MPU6050 with the correct parameters
-  while (!mpu.begin(MPU6050_SCALE_2000DPS, MPU6050_RANGE_2G)) {
-    Serial.println("Could not find a valid MPU6050 sensor, check wiring!");
-    delay(500);
-  }
-  
-  mpu.setAccelPowerOnDelay(MPU6050_DELAY_3MS);
-  
-  mpu.setIntFreeFallEnabled(true);
-  mpu.setIntZeroMotionEnabled(true);
-  mpu.setIntMotionEnabled(true);
-  
-  mpu.setDHPFMode(MPU6050_DHPF_5HZ);
-
-  // Adjust thresholds and durations
-  mpu.setFreeFallDetectionThreshold(10);
-  mpu.setFreeFallDetectionDuration(1);
-  mpu.setMotionDetectionThreshold(2);
-  mpu.setMotionDetectionDuration(1);
-
-  mpu.setThreshold(3);  // Set the sensitivity threshold
-
-  previousTime = millis();
+// Serve the HTML page
+void handleRoot() {
+  String s = MAIN_page;  // Assuming MAIN_page is defined in "index.h"
+  server.send(200, "text/html", s);
 }
 
-void loop()
-{
-  unsigned long currentTime = millis();
-  timeStep = (currentTime - previousTime) / 1000.0;  // Convert to seconds
-  previousTime = currentTime;
+// Sensor data variables
+float humidity, temperature;
+double Temperature, pressure, Altitude;
 
-  // Read temperature, accelerometer, and gyroscope values
-  float temp = mpu.readTemperature();
-  Vector normAccel = mpu.readNormalizeAccel();
-  Vector normGyro = mpu.readNormalizeGyro(); // Correct method to read gyro values
+void handleADC() {
+  // Start temperature reading
+  if (bmp180.startTemperature()) {
+    delay(5);  // Wait for the temperature reading to complete
 
-  Serial.print("Temp = ");
-  Serial.print(temp);
-  Serial.println(" *C");
+    // Get the temperature value and store it in the 'temperature' variable
+    if (bmp180.getTemperature(Temperature)) {
+      Temperature = (int)Temperature;  // Convert to integer
+    }
 
-  Serial.print("Accelerometer (m/s²) ");
-  Serial.print(" Xnorm = ");
-  Serial.print(normAccel.XAxis);
-  Serial.print(" Ynorm = ");
-  Serial.print(normAccel.YAxis);
-  Serial.print(" Znorm = ");
-  Serial.println(normAccel.ZAxis);
+    // Start pressure reading (using oversampling = 3 for higher resolution)
+    if (bmp180.startPressure(3)) {
+      delay(26);  // Wait for the pressure reading to complete
 
-  Serial.print("Gyroscope (°/s) ");
-  Serial.print(" Xnorm = ");
-  Serial.print(normGyro.XAxis);
-  Serial.print(" Ynorm = ");
-  Serial.print(normGyro.YAxis);
-  Serial.print(" Znorm = ");
-  Serial.println(normGyro.ZAxis);
-
-  // Calculate Pitch, Roll and Yaw using time-based integration
-  pitch += normGyro.YAxis * timeStep;
-  roll += normGyro.XAxis * timeStep;
-  yaw += normGyro.ZAxis * timeStep;
-
-  // Count full rotations for Pitch, Roll, and Yaw
-  if (pitch >= 360 || pitch <= -360) {
-    pitchRounds++;
-    pitch = 0;  // Reset pitch after a full rotation
+      // Get the pressure value and store it in the 'pressure' variable
+      if (bmp180.getPressure(pressure, Temperature)) {
+        pressure = (int)pressure;  // Convert to integer
+      }
+    }
   }
 
-  if (roll >= 360 || roll <= -360) {
-    rollRounds++;
-    roll = 0;  // Reset roll after a full rotation
+  // Calculate altitude using the pressure value
+  int altitude = bmp180.altitude(pressure, P0);
+  
+  // Read humidity and temperature from DHT sensor
+  humidity = dht.readHumidity();  // Read humidity
+  temperature = dht.readTemperature();  // Read temperature
+
+  // Prepare the sensor data as JSON
+  String data = "{\"Pressure\":\"" + String(pressure) + "\", \"Altitude\":\"" + String(altitude) + "\", \"Temperature\":\"" + String(temperature) + "\", \"Humidity\":\"" + String(humidity) + "\"}";
+
+  // Send the data
+  server.send(200, "text/plain", data);
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println();
+
+  // Initialize DHT sensor
+  dht.begin();
+
+  // Start I2C communication with custom SDA and SCL pins
+  Wire.begin(SDA_PIN, SCL_PIN);
+
+  // Initialize BMP180 sensor
+  if (!bmp180.begin()) {
+    Serial.println("Failed to initialize BMP180 sensor");
+    while (1);  // Stop execution if sensor is not found
   }
 
-  if (yaw >= 360 || yaw <= -360) {
-    yawRounds++;
-    yaw = 0;  // Reset yaw after a full rotation
+  // Connect to Wi-Fi
+  WiFi.begin(ssid, password);
+  Serial.println();
+  
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
   }
 
-  // Output only the rotation counts
-  Serial.print("Pitch Rounds = ");
-  Serial.print(pitchRounds);
-  Serial.print(" Roll Rounds = ");
-  Serial.print(rollRounds);  
-  Serial.print(" Yaw Rounds = ");
-  Serial.println(yawRounds);
+  Serial.println("");
+  Serial.print("Connected to ");
+  Serial.println(ssid);
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
 
-  // Read Activities (e.g., free fall or motion detection)
-  Activites act = mpu.readActivites();
+  // Define server routes
+  server.on("/", handleRoot);
+  server.on("/readADC", handleADC);
 
-  if (act.isFreeFall) {
-    Serial.println("Freefall");
-  } else {
-    Serial.println("No Freefall");
-  }
+  // Start the server
+  server.begin();
+  Serial.println("HTTP server started");
 
-  if (act.isActivity) {
-    Serial.println("Motion Detected");
-  } else {
-    Serial.println("No Motion");
-  }
+  Serial.print("WiFi Status: ");
+  Serial.println(WiFi.status());
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+}
 
-  delay(500);  // Delay between readings for better visualization
+void loop() {
+  server.handleClient();  // Handle incoming client requests
 }
